@@ -32,12 +32,13 @@ class SADAStepCounter:
         else:
             first_sigma = self.sigma_history[0]
             current_sigma = sigma
-            
             if first_sigma > 0:
                 progress = max(0, min(1, (first_sigma - current_sigma) / first_sigma))
                 self.current_step = int(progress * self.total_steps)
             else:
-                self.current_step = len(self.sigma_history) - 1
+                prev_sigma = self.sigma_history[-2]
+                if abs(current_sigma - prev_sigma) > 1e-12:
+                    self.current_step = min(self.total_steps, self.current_step + 1)
         
         return self.current_step
     
@@ -73,7 +74,7 @@ class SADAStepSkipper:
     def __init__(self, skip_ratio, acc_range, stability_threshold=0.05):
         self.skip_ratio = skip_ratio
         self.acc_range = acc_range
-        self.stability_threshold = stability_threshold
+        self.stability_threshold = min(0.2, stability_threshold + skip_ratio * 0.25)
         self.reset()
         
     def should_skip_step(self, current_features, timestep_tensor, total_steps):
@@ -99,20 +100,28 @@ class SADAStepSkipper:
             print(f"SADA: Acceleration started at step {current_step}")
             _sada_state['logged_first_skip'] = True
             
-        # Edge protection
-        if current_step < acc_start + 2 or current_step > acc_end - 2:
+        margin = 1 if total_steps <= 14 else 2
+        if current_step < acc_start + margin or current_step > acc_end - margin:
             return False
             
-        # Consecutive skip limit
-        if self.skip_count >= 2:
+        max_skips = 2 if self.skip_ratio <= 0.25 else 3
+        if self.skip_count >= max_skips:
             self.skip_count = 0
             return False
             
         # Feature stability check
         if self.prev_features is not None:
             try:
-                current_flat = current_features.flatten()
-                prev_flat = self.prev_features.flatten()
+                if len(current_features.shape) == 4:
+                    H = min(current_features.shape[2], 32)
+                    W = min(current_features.shape[3], 32)
+                    cf = F.interpolate(current_features, size=(H, W), mode='bilinear', align_corners=False)
+                    pf = F.interpolate(self.prev_features, size=(H, W), mode='bilinear', align_corners=False)
+                    current_flat = cf.flatten()
+                    prev_flat = pf.flatten()
+                else:
+                    current_flat = current_features.flatten()
+                    prev_flat = self.prev_features.flatten()
                 
                 min_size = min(len(current_flat), len(prev_flat))
                 if min_size > 0:
@@ -125,6 +134,15 @@ class SADAStepSkipper:
                     ).item()
                     
                     if similarity > (1.0 - self.stability_threshold):
+                        self.skip_count += 1
+                        _sada_state['total_skips'] += 1
+                        return True
+
+                    delta = torch.mean(torch.abs(current_flat - prev_flat)).item()
+                    prev_mag = torch.mean(torch.abs(prev_flat)).item()
+                    ratio = delta / (prev_mag + 1e-8)
+                    eps = max(0.03, 0.08 - self.skip_ratio * 0.1)
+                    if ratio < eps:
                         self.skip_count += 1
                         _sada_state['total_skips'] += 1
                         return True
@@ -189,7 +207,7 @@ def apply_sada_acceleration(unet_patcher, skip_ratio, acc_range, early_exit_thre
             if _sada_state['step_skipper'].should_skip_step(x, timestep, total_steps):
                 if hasattr(wrapped_apply_model, '_last_result'):
                     sigma = safe_tensor_to_float(timestep)
-                    noise_scale = sigma * 0.03
+                    noise_scale = sigma * (0.02 if total_steps <= 14 else 0.03)
                     noise = torch.randn_like(x) * noise_scale
                     return wrapped_apply_model._last_result + noise
             
@@ -296,8 +314,8 @@ class SADAForForge(scripts.Script):
                 )
                 acc_end = gr.Slider(
                     label='End Step', 
-                    minimum=25, maximum=50, step=1, value=45,
-                    info="Stop acceleration at this step"
+                    minimum=1, maximum=50, step=1, value=45,
+                    info="Stop acceleration (scaled to total steps)"
                 )
             
             with gr.Row():
@@ -361,7 +379,12 @@ class SADAForForge(scripts.Script):
             return
         
         total_steps = getattr(p, 'steps', 20)
-        acc_range = (int(acc_start), int(acc_end))
+        base_total = 50.0
+        ui_start = int(acc_start)
+        ui_end = int(acc_end)
+        scaled_start = max(0, min(total_steps, int(round(ui_start / base_total * total_steps))))
+        scaled_end = max(scaled_start + 2, min(total_steps, int(round(ui_end / base_total * total_steps))))
+        acc_range = (scaled_start, scaled_end)
         
         try:
             unet = p.sd_model.forge_objects.unet
@@ -376,12 +399,12 @@ class SADAForForge(scripts.Script):
             
             p.sd_model.forge_objects.unet = unet
             
-            # Log parameters with preset info
             p.extra_generation_params.update({
                 'SADA_v4': True,
                 'SADA_preset': model_preset,
                 'SADA_skip': skip_ratio,
                 'SADA_range': f"{acc_start}-{acc_end}",
+                'SADA_range_actual': f"{scaled_start}-{scaled_end}",
                 'SADA_threshold': early_exit_threshold
             })
             
