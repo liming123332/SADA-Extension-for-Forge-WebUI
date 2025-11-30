@@ -74,7 +74,7 @@ class SADAStepSkipper:
     def __init__(self, skip_ratio, acc_range, stability_threshold=0.05):
         self.skip_ratio = skip_ratio
         self.acc_range = acc_range
-        self.stability_threshold = min(0.2, stability_threshold + skip_ratio * 0.25)
+        self.stability_threshold = min(0.35, stability_threshold + skip_ratio * 0.4)
         self.reset()
         
     def should_skip_step(self, current_features, timestep_tensor, total_steps):
@@ -84,6 +84,7 @@ class SADAStepSkipper:
         sigma = safe_tensor_to_float(timestep_tensor)
         current_step = self.step_counter.update_step(sigma, total_steps)
         acc_start, acc_end = self.acc_range
+        range_progress = max(0.0, min(1.0, (current_step - acc_start) / max(1, acc_end - acc_start)))
         
         # Log activation only once at start
         if not _sada_state['logged_activation']:
@@ -100,7 +101,13 @@ class SADAStepSkipper:
             print(f"SADA: Acceleration started at step {current_step}")
             _sada_state['logged_first_skip'] = True
             
-        margin = 1 if total_steps <= 14 else 2
+        window = max(0, acc_end - acc_start)
+        if total_steps <= 20:
+            margin = 0
+        else:
+            base_margin = 1 if total_steps <= 32 else 2
+            margin = 0 if window <= 4 else (1 if window <= 6 else base_margin)
+            
         if current_step < acc_start + margin or current_step > acc_end - margin:
             return False
             
@@ -133,7 +140,15 @@ class SADAStepSkipper:
                         prev_flat.unsqueeze(0)
                     ).item()
                     
-                    if similarity > (1.0 - self.stability_threshold):
+                    if total_steps <= 20:
+                        # Aggressive mode for LCM/Turbo
+                        sim_threshold = 0.45
+                    else:
+                        low_step_bias = 0.15 if total_steps <= 32 else 0.0
+                        dyn_stability = min(0.85, self.stability_threshold + 0.25 * range_progress + (0.1 if self.skip_ratio >= 0.3 else 0.0) + low_step_bias)
+                        sim_threshold = 1.0 - dyn_stability
+                    
+                    if similarity > sim_threshold:
                         self.skip_count += 1
                         _sada_state['total_skips'] += 1
                         return True
@@ -141,7 +156,12 @@ class SADAStepSkipper:
                     delta = torch.mean(torch.abs(current_flat - prev_flat)).item()
                     prev_mag = torch.mean(torch.abs(prev_flat)).item()
                     ratio = delta / (prev_mag + 1e-8)
-                    eps = max(0.03, 0.08 - self.skip_ratio * 0.1)
+                    
+                    if total_steps <= 20:
+                        eps = 0.7
+                    else:
+                        eps = min(0.45, max(0.02, 0.10 - self.skip_ratio * 0.15 + 0.20 * range_progress))
+                        
                     if ratio < eps:
                         self.skip_count += 1
                         _sada_state['total_skips'] += 1
@@ -314,7 +334,7 @@ class SADAForForge(scripts.Script):
                 )
                 acc_end = gr.Slider(
                     label='End Step', 
-                    minimum=1, maximum=50, step=1, value=45,
+                    minimum=1, maximum=50, step=1, value=25,
                     info="Stop acceleration (scaled to total steps)"
                 )
             
@@ -331,21 +351,21 @@ class SADAForForge(scripts.Script):
                     return {
                         skip_ratio: gr.update(value=0.2),
                         acc_start: gr.update(value=15),
-                        acc_end: gr.update(value=45),
+                        acc_end: gr.update(value=45, minimum=1),
                         early_exit_threshold: gr.update(value=0.02)
                     }
                 elif preset_choice == "Flux (Aggressive)":
                     return {
                         skip_ratio: gr.update(value=0.3),
                         acc_start: gr.update(value=7),
-                        acc_end: gr.update(value=35),
+                        acc_end: gr.update(value=35, minimum=1),
                         early_exit_threshold: gr.update(value=0.04)
                     }
                 else:
                     return {
                         skip_ratio: gr.update(),
                         acc_start: gr.update(),
-                        acc_end: gr.update(),
+                        acc_end: gr.update(minimum=1),
                         early_exit_threshold: gr.update()
                     }
             
@@ -354,6 +374,15 @@ class SADAForForge(scripts.Script):
                 fn=update_preset,
                 inputs=[model_preset],
                 outputs=[skip_ratio, acc_start, acc_end, early_exit_threshold]
+            )
+
+            def ensure_end_min(_):
+                return gr.update(minimum=1)
+
+            sada_enabled.change(
+                fn=ensure_end_min,
+                inputs=[sada_enabled],
+                outputs=[acc_end]
             )
             
             gr.HTML("""
