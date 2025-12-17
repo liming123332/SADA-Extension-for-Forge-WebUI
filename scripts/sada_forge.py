@@ -180,6 +180,28 @@ class SADAStepSkipper:
         self.prev_features = None
         self.skip_count = 0
 
+
+def _calculate_acc_range(total_steps, ui_start, ui_end, base_total=50.0):
+    """
+    Scale UI-provided acceleration range to the actual total steps while keeping bounds safe.
+    Ensures the end is within the available steps and always after the start.
+    """
+    steps = max(0, int(total_steps))
+
+    if steps <= 1:
+        return (0, max(0, steps - 1))
+
+    max_start = max(0, steps - 2)
+    scaled_start = int(round(ui_start / base_total * steps))
+    scaled_start = max(0, min(max_start, scaled_start))
+
+    raw_end = int(round(ui_end / base_total * steps))
+    bounded_end = min(raw_end, steps)
+    scaled_end = max(scaled_start + 1, bounded_end)
+    scaled_end = min(steps - 1, scaled_end)
+
+    return (scaled_start, scaled_end)
+
 def cleanup_sada_patches():
     """Clean up any existing SADA patches."""
     global _sada_state
@@ -407,13 +429,15 @@ class SADAForForge(scripts.Script):
         if not sada_enabled:
             return
         
-        total_steps = getattr(p, 'steps', 20)
+        total_steps = max(0, int(getattr(p, 'steps', 20)))
         base_total = 50.0
         ui_start = int(acc_start)
         ui_end = int(acc_end)
-        scaled_start = max(0, min(total_steps, int(round(ui_start / base_total * total_steps))))
-        scaled_end = max(scaled_start + 2, min(total_steps, int(round(ui_end / base_total * total_steps))))
-        acc_range = (scaled_start, scaled_end)
+        acc_range = _calculate_acc_range(total_steps, ui_start, ui_end, base_total)
+
+        if total_steps <= 1:
+            print(f"SADA: Disabled - total steps too low ({total_steps})")
+            return
         
         try:
             unet = p.sd_model.forge_objects.unet
@@ -433,7 +457,7 @@ class SADAForForge(scripts.Script):
                 'SADA_preset': model_preset,
                 'SADA_skip': skip_ratio,
                 'SADA_range': f"{acc_start}-{acc_end}",
-                'SADA_range_actual': f"{scaled_start}-{scaled_end}",
+                'SADA_range_actual': f"{acc_range[0]}-{acc_range[1]}",
                 'SADA_threshold': early_exit_threshold
             })
             
