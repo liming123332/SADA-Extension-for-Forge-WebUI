@@ -13,7 +13,8 @@ _sada_state = {
     'logged_activation': False,
     'logged_first_skip': False,
     'total_skips': 0,
-    'total_steps': 0
+    'total_steps': 0,
+    'cleanup_warning_logged': False
 }
 
 class SADAStepCounter:
@@ -196,6 +197,15 @@ def cleanup_sada_patches():
             _sada_state['patched_unet'].model.apply_model = _sada_state['original_apply_model']
         except Exception as e:
             print(f"SADA: Cleanup error: {e}")
+
+    patched_unet = _sada_state.get('patched_unet')
+    if patched_unet is not None:
+        try:
+            patched_unet.set_model_output_block_patch(None)
+        except Exception as e:
+            if not _sada_state.get('cleanup_warning_logged', False):
+                print(f"SADA: Cleanup warning - failed to clear UNet forward patch: {e}")
+                _sada_state['cleanup_warning_logged'] = True
     
     # Reset all state
     _sada_state.update({
@@ -206,7 +216,8 @@ def cleanup_sada_patches():
         'logged_activation': False,
         'logged_first_skip': False,
         'total_skips': 0,
-        'total_steps': 0
+        'total_steps': 0,
+        'cleanup_warning_logged': False
     })
 
 def apply_sada_acceleration(unet_patcher, skip_ratio, acc_range, early_exit_threshold, total_steps):
