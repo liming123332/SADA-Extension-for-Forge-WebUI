@@ -3,6 +3,15 @@ import torch.nn.functional as F
 import gradio as gr
 from modules import scripts
 
+SADA_PARAM_KEYS = (
+    'SADA_v4',
+    'SADA_preset',
+    'SADA_skip',
+    'SADA_range',
+    'SADA_range_actual',
+    'SADA_threshold'
+)
+
 # Global storage for cleanup and logging
 _sada_state = {
     'step_skipper': None,
@@ -46,6 +55,16 @@ class SADAStepCounter:
         self.total_steps = 50
         self.step_history = []
         self.sigma_history = []
+
+def clear_sada_generation_params(extra_params):
+    """Remove SADA metadata to avoid stale values leaking between runs."""
+    if not isinstance(extra_params, dict):
+        return {}
+
+    for key in SADA_PARAM_KEYS:
+        extra_params.pop(key, None)
+
+    return extra_params
 
 def safe_tensor_to_float(tensor):
     """Safely convert tensor to float, handling multiple elements."""
@@ -424,7 +443,12 @@ class SADAForForge(scripts.Script):
         sada_enabled, model_preset, skip_ratio, acc_start, acc_end, early_exit_threshold = script_args
         
         cleanup_sada_patches()
-        
+
+        if not isinstance(getattr(p, 'extra_generation_params', None), dict):
+            p.extra_generation_params = {}
+
+        clear_sada_generation_params(p.extra_generation_params)
+
         if not sada_enabled:
             return
         
@@ -463,6 +487,6 @@ class SADAForForge(scripts.Script):
         except Exception as e:
             print(f"SADA: Failed to apply: {e}")
             cleanup_sada_patches()
+            clear_sada_generation_params(p.extra_generation_params)
         
         return
-

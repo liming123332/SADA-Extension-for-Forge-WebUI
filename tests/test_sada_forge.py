@@ -119,3 +119,33 @@ def test_acc_range_scaling_small_steps(monkeypatch, sada_module, total_steps, ex
     assert captured["total_steps"] == total_steps
     assert p.extra_generation_params["SADA_range_actual"] == f"{expected_range[0]}-{expected_range[1]}"
     assert p.sd_model.forge_objects.unet == "patched"
+
+
+def test_clears_extra_params_when_disabled(sada_module):
+    script = sada_module.SADAForForge()
+    sd_model = types.SimpleNamespace(forge_objects=types.SimpleNamespace(unet="base"))
+    extra_params = {
+        "SADA_v4": True,
+        "SADA_range": "old",
+        "other": "keep",
+    }
+    p = types.SimpleNamespace(steps=30, sd_model=sd_model, extra_generation_params=extra_params)
+
+    script.process_before_every_sampling(p, False, "SDXL (Balanced)", 0.2, 15, 45, 0.02)
+
+    assert p.extra_generation_params == {"other": "keep"}
+
+
+def test_clears_extra_params_when_steps_too_low(sada_module):
+    script = sada_module.SADAForForge()
+    sd_model = types.SimpleNamespace(forge_objects=types.SimpleNamespace(unet="base"))
+    extra_params = {
+        "SADA_v4": True,
+        "SADA_range_actual": "old",
+        "other": "keep",
+    }
+    p = types.SimpleNamespace(steps=0, sd_model=sd_model, extra_generation_params=extra_params)
+
+    script.process_before_every_sampling(p, True, "SDXL (Balanced)", 0.2, 15, 45, 0.02)
+
+    assert p.extra_generation_params == {"other": "keep"}
