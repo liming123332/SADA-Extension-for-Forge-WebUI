@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import gradio as gr
-import math
 from modules import scripts
 
 # Global storage for cleanup and logging
