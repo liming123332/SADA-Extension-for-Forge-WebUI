@@ -157,3 +157,26 @@ def test_cleanup_warns_once_and_resets_state_on_patch_clear_failure(capsys):
     assert sada_forge._sada_state["is_active"] is False
     assert sada_forge._sada_state["patched_unet"] is None
     assert sada_forge._sada_state["cleanup_warning_logged"] is False
+
+
+def test_cleanup_handles_missing_forward_patch_method():
+    reset_state()
+
+    class NoPatchSetter(DummyUNetPatcher):
+        def set_model_output_block_patch(self, patch_fn):
+            raise AttributeError("should not be called")
+
+    unet = NoPatchSetter()
+    returned = sada_forge.apply_sada_acceleration(
+        unet_patcher=unet,
+        skip_ratio=0.1,
+        acc_range=(0, 1),
+        early_exit_threshold=0.01,
+        total_steps=8,
+    )
+
+    sada_forge.cleanup_sada_patches()
+
+    assert returned is unet
+    assert sada_forge._sada_state["patched_unet"] is None
+    assert sada_forge._sada_state["original_apply_model"] is None

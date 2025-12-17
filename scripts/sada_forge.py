@@ -4,8 +4,7 @@ import gradio as gr
 import math
 from modules import scripts
 
-# Global storage for cleanup and logging
-_sada_state = {
+_SADA_DEFAULT_STATE = {
     'step_skipper': None,
     'original_apply_model': None,
     'patched_unet': None,
@@ -16,6 +15,9 @@ _sada_state = {
     'total_steps': 0,
     'cleanup_warning_logged': False
 }
+
+# Global storage for cleanup and logging
+_sada_state = _SADA_DEFAULT_STATE.copy()
 
 class SADAStepCounter:
     """Tracks actual sampling steps for precise control."""
@@ -192,33 +194,27 @@ def cleanup_sada_patches():
         if total > 0:
             print(f"SADA: Completed - skipped {skipped}/{total} steps ({skipped/total*100:.1f}%)")
     
-    if _sada_state['patched_unet'] is not None and _sada_state['original_apply_model'] is not None:
+    patched_unet = _sada_state.get('patched_unet')
+    original_apply_model = _sada_state.get('original_apply_model')
+
+    if patched_unet is not None and original_apply_model is not None:
         try:
-            _sada_state['patched_unet'].model.apply_model = _sada_state['original_apply_model']
+            patched_unet.model.apply_model = original_apply_model
         except Exception as e:
             print(f"SADA: Cleanup error: {e}")
 
-    patched_unet = _sada_state.get('patched_unet')
     if patched_unet is not None:
         try:
-            patched_unet.set_model_output_block_patch(None)
+            setter = getattr(patched_unet, 'set_model_output_block_patch', None)
+            if callable(setter):
+                setter(None)
         except Exception as e:
             if not _sada_state.get('cleanup_warning_logged', False):
                 print(f"SADA: Cleanup warning - failed to clear UNet forward patch: {e}")
                 _sada_state['cleanup_warning_logged'] = True
     
-    # Reset all state
-    _sada_state.update({
-        'step_skipper': None,
-        'original_apply_model': None,
-        'patched_unet': None,
-        'is_active': False,
-        'logged_activation': False,
-        'logged_first_skip': False,
-        'total_skips': 0,
-        'total_steps': 0,
-        'cleanup_warning_logged': False
-    })
+    # Reset all state (preserve any future keys)
+    _sada_state.update(_SADA_DEFAULT_STATE)
 
 def apply_sada_acceleration(unet_patcher, skip_ratio, acc_range, early_exit_threshold, total_steps):
     """Apply SADA with clean logging."""
@@ -293,7 +289,18 @@ def apply_sada_acceleration(unet_patcher, skip_ratio, acc_range, early_exit_thre
         return h, hsp
     
     m = unet_patcher.clone()
-    m.set_model_output_block_patch(sada_forward_patch)
+    setter = getattr(m, 'set_model_output_block_patch', None)
+    if callable(setter):
+        try:
+            setter(sada_forward_patch)
+        except Exception as e:
+            print(f"SADA: Failed to set UNet forward patch: {e}")
+            cleanup_sada_patches()
+            return unet_patcher
+    else:
+        print("SADA: UNet patcher missing set_model_output_block_patch; skipping acceleration.")
+        cleanup_sada_patches()
+        return unet_patcher
     
     try:
         _sada_state['original_apply_model'] = m.model.apply_model
