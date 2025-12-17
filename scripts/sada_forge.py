@@ -19,6 +19,11 @@ _SADA_DEFAULT_STATE = {
 # Global storage for cleanup and logging
 _sada_state = _SADA_DEFAULT_STATE.copy()
 
+
+def _reset_sada_state():
+    """Reset SADA bookkeeping to default values."""
+    _sada_state.update(_SADA_DEFAULT_STATE)
+
 class SADAStepCounter:
     """Tracks actual sampling steps for precise control."""
     def __init__(self):
@@ -213,8 +218,7 @@ def cleanup_sada_patches():
                 print(f"SADA: Cleanup warning - failed to clear UNet forward patch: {e}")
                 _sada_state['cleanup_warning_logged'] = True
     
-    # Reset all state (preserve any future keys)
-    _sada_state.update(_SADA_DEFAULT_STATE)
+    _reset_sada_state()
 
 def apply_sada_acceleration(unet_patcher, skip_ratio, acc_range, early_exit_threshold, total_steps):
     """Apply SADA with clean logging."""
